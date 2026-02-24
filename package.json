@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "build": "cd my-react-app && npm run build",
+    "dev": "cd my-react-app && npm run dev"
+  },
+  "dependencies": {
+    "firebase": "^12.9.0"
+  }
+}

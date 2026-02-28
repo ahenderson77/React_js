@@ -35,22 +35,77 @@ function App() {
   // tasklist -----> listitems
   const [tasklist, setTaskslist] = useState([]);
   const [user, setUser] = useState(null);
+  const [sortMode, setSortMode] = useState('time');
   const allowedInputRegex = /^[A-Za-z0-9 ]+$/;
+
+  const getCreatedAtTime = (value) => {
+    if (!value) return 0;
+    if (value instanceof Date) return value.getTime();
+    if (typeof value?.toDate === 'function') return value.toDate().getTime();
+    if (typeof value === 'number') return value;
+
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+
+  const persistSortedOrder = async (sortedTasks) => {
+    try {
+      await Promise.all(
+        sortedTasks.map((task, index) => updateDoc(doc(taskdata, task.id), { sort_index: index }))
+      );
+    } catch (error) {
+      console.error('Error persisting sorted order: ', error);
+    }
+  };
+
+  const sortTasks = (tasks, mode) => {
+    if (mode === 'priority') {
+      const priorityOrder = { hot: 0, cool: 1, complete: 2 };
+      return [...tasks].sort((firstTask, secondTask) => {
+        const firstPriority = priorityOrder[firstTask.status] ?? 3;
+        const secondPriority = priorityOrder[secondTask.status] ?? 3;
+        return firstPriority - secondPriority;
+      });
+    }
+
+    if (mode === 'user') {
+      return [...tasks].sort((firstTask, secondTask) => {
+        const firstUser = firstTask.created_by ?? '';
+        const secondUser = secondTask.created_by ?? '';
+
+        if (!firstUser && !secondUser) return 0;
+        if (!firstUser) return 1;
+        if (!secondUser) return -1;
+
+        return firstUser.localeCompare(secondUser);
+      });
+    }
+
+    return [...tasks].sort(
+      (firstTask, secondTask) =>
+        getCreatedAtTime(firstTask.created_at) - getCreatedAtTime(secondTask.created_at)
+    );
+  };
+
   //add action listen to database changes
   useEffect(() => {
     const snap = onSnapshot(taskdata, (snapshot) => {
-      const tasks = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        content: doc.data().content,
-        status: doc.data().status,
-        style: doc.data().style,
-        created_by: doc.data().created_by,
-        created_at: doc.data().created_at,
-      }));
+      const tasks = sortTasks(
+        snapshot.docs.map((doc) => ({
+          id: doc.id,
+          content: doc.data().content,
+          status: doc.data().status,
+          style: doc.data().style,
+          created_by: doc.data().created_by,
+          created_at: doc.data().created_at,
+          sort_index: doc.data().sort_index,
+        })),
+        sortMode
+      );
       setTaskslist(tasks);
     });
     return () => snap(); // Clean up the listener on unmount
-  }, [])
+  }, [sortMode])
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -77,11 +132,20 @@ function App() {
       }
 
       const newDocref = doc(taskdata);
-      const newtask = { id: newDocref.id, content: taskContent, status: "cool", created_by: user?.uid, created_at: new Date() };
-      setTaskslist([...tasklist, newtask]);
+      const newtask = {
+        id: newDocref.id,
+        content: taskContent,
+        status: "cool",
+        created_by: user?.uid,
+        created_at: new Date(),
+        sort_index: tasklist.length,
+      };
+      const nextTasks = sortTasks([...tasklist, newtask], sortMode);
+      setTaskslist(nextTasks);
       event.target.value = "";
       // Add the new task to Firestore
       await setDoc(newDocref, newtask);
+      await persistSortedOrder(nextTasks);
     }
   }
 
@@ -115,57 +179,36 @@ function App() {
     });
   }
 
-  function sortByPriority() {
-    const priorityOrder = { hot: 0, cool: 1, complete: 2 };
-    setTaskslist((prev) =>
-      [...prev].sort((firstTask, secondTask) => {
-        const firstPriority = priorityOrder[firstTask.status] ?? 3;
-        const secondPriority = priorityOrder[secondTask.status] ?? 3;
-        return firstPriority - secondPriority;
-      })
-    );
+  async function sortByPriority() {
+    const sortedTasks = sortTasks(tasklist, 'priority');
+
+    setSortMode('priority');
+    setTaskslist(sortedTasks);
+    await persistSortedOrder(sortedTasks);
   }
 
-  function sortByChronological() {
-    const getCreatedAtTime = (value) => {
-      if (!value) return 0;
-      if (value instanceof Date) return value.getTime();
-      if (typeof value?.toDate === 'function') return value.toDate().getTime();
-      if (typeof value === 'number') return value;
+  async function sortByChronological() {
+    const sortedTasks = sortTasks(tasklist, 'time');
 
-      const parsed = new Date(value).getTime();
-      return Number.isNaN(parsed) ? 0 : parsed;
-    };
-
-    setTaskslist((prev) =>
-      [...prev].sort(
-        (firstTask, secondTask) =>
-          getCreatedAtTime(firstTask.created_at) - getCreatedAtTime(secondTask.created_at)
-      )
-    );
+    setSortMode('time');
+    setTaskslist(sortedTasks);
+    await persistSortedOrder(sortedTasks);
   }
 
-  function sortByUser() {
-    setTaskslist((prev) =>
-      [...prev].sort((firstTask, secondTask) => {
-        const firstUser = firstTask.created_by ?? '';
-        const secondUser = secondTask.created_by ?? '';
+  async function sortByUser() {
+    const sortedTasks = sortTasks(tasklist, 'user');
 
-        if (!firstUser && !secondUser) return 0;
-        if (!firstUser) return 1;
-        if (!secondUser) return -1;
-
-        return firstUser.localeCompare(secondUser);
-      })
-    );
+    setSortMode('user');
+    setTaskslist(sortedTasks);
+    await persistSortedOrder(sortedTasks);
   }
 
-  function handleSortSelection(event) {
+  async function handleSortSelection(event) {
     const selectedSort = event.target.value;
 
-    if (selectedSort === 'priority') sortByPriority();
-    if (selectedSort === 'time') sortByChronological();
-    if (selectedSort === 'user') sortByUser();
+    if (selectedSort === 'priority') await sortByPriority();
+    if (selectedSort === 'time') await sortByChronological();
+    if (selectedSort === 'user') await sortByUser();
 
     event.target.value = '';
   }
